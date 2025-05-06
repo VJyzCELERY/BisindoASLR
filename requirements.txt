@@ -1,0 +1,9 @@
+matplotlib==3.10.1
+mediapipe==0.10.21
+numpy==2.2.5
+opencv_contrib_python==4.11.0.86
+opencv_python==4.11.0.86
+scikit_learn==1.6.1
+seaborn==0.13.2
+torch==2.7.0+cu128
+tqdm==4.67.1
