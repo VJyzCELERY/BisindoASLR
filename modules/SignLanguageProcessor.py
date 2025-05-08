@@ -8,13 +8,14 @@ import glob
 import json
 import time
 import random
+import math
 from tqdm import tqdm
 import gc
 from collections import deque
 import matplotlib.pyplot as plt
 from modules.GraphUtil import create_norm_adjacency_matrix,create_adjacency_matrix
 from modules.GCNModel import GCNBiLSTM
-from modules.Constants import NUM_NODES,FEATURE_DIM
+from modules.Constants import NUM_NODES,FEATURE_DIM,pose_connections,hand_connections
 from sklearn.preprocessing import LabelEncoder
 
 class RealtimeSignLanguageProcessor:
@@ -340,6 +341,187 @@ class RealtimeSignLanguageProcessor:
         
         return landmarks
     
+    def extract_landmarks_normalized(self, results):
+        """
+        Extract key landmarks from MediaPipe results and normalize them 
+        with a unified coordinate system that preserves relationships
+        between hands and body
+        
+        Args:
+            results: MediaPipe Holistic results
+            
+        Returns:
+            Dictionary containing normalized landmarks for face, pose, left hand, and right hand
+        """
+        # First, extract the original landmarks
+        landmarks = self.extract_landmarks(results)
+        
+        # Then perform unified normalization
+        normalized_landmarks = self._normalize_landmarks_unified(landmarks)
+        
+        return normalized_landmarks
+
+    def _normalize_landmarks_unified(self, landmarks):
+        """
+        Normalize all landmarks using a unified coordinate system
+        based on the shoulder width and midpoint
+        
+        Args:
+            landmarks: Dictionary with 'pose', 'left_hand', and 'right_hand' landmarks
+            
+        Returns:
+            Dictionary with unified normalized landmarks
+        """
+        # Create a copy of the original landmarks
+        normalized = {
+            'pose': [lm.copy() for lm in landmarks['pose']],
+            'left_hand': [lm.copy() for lm in landmarks['left_hand']],
+            'right_hand': [lm.copy() for lm in landmarks['right_hand']]
+        }
+        
+        # Find left and right shoulder landmarks (indices 11 and 12)
+        left_shoulder = next((lm for lm in landmarks['pose'] if lm['indices'] == 11), None)
+        right_shoulder = next((lm for lm in landmarks['pose'] if lm['indices'] == 12), None)
+        
+        # If shoulders are not visible, try to use the neck/nose point
+        if not left_shoulder or not right_shoulder or left_shoulder['visibility'] < 0.1 or right_shoulder['visibility'] < 0.1:
+            # Use nose (index 0) as reference if available
+            nose = next((lm for lm in landmarks['pose'] if lm['indices'] == 0), None)
+            if nose and nose['visibility'] > 0.1:
+                # Create an artificial reference frame based on the nose
+                mid_x = nose['x']
+                mid_y = nose['y']
+                # Use a default scale based on an average proportion
+                scale = 0.2  # Typical proportion of shoulder width to frame width
+            else:
+                # Cannot normalize without any reference points
+                return landmarks
+        else:
+            # Calculate the midpoint between shoulders as the origin
+            mid_x = (left_shoulder['x'] + right_shoulder['x']) / 2
+            mid_y = (left_shoulder['y'] + right_shoulder['y']) / 2
+            
+            # Calculate the scale factor based on shoulder width
+            scale = ((left_shoulder['x'] - right_shoulder['x'])**2 + 
+                    (left_shoulder['y'] - right_shoulder['y'])**2)**0.5
+        
+        if scale < 0.01:  # Avoid division by near-zero
+            scale = 0.2  # Use a default scale
+        
+        # Determine overall orientation (optional)
+        # We could calculate the angle of the shoulders and rotate everything
+        # to standardize the orientation, but this might not be necessary for ASL
+        # since the person is typically facing the camera
+        
+        # Normalize all landmarks in a unified way
+        for category in ['pose', 'left_hand', 'right_hand']:
+            for i, lm in enumerate(landmarks[category]):
+                if lm['visibility'] < 0.1:
+                    continue
+                    
+                # Store original coordinates
+                normalized[category][i]['original_x'] = lm['x']
+                normalized[category][i]['original_y'] = lm['y']
+                
+                # Translate relative to shoulder midpoint and scale by shoulder width
+                normalized[category][i]['x'] = (lm['x'] - mid_x) / scale
+                normalized[category][i]['y'] = (lm['y'] - mid_y) / scale
+        
+        return normalized
+
+    def normalize_hands_with_wrists(self, landmarks):
+        """
+        An alternative normalization that preserves hand shapes while
+        still maintaining the relationship between hands and body
+        
+        Args:
+            landmarks: Dictionary with 'pose', 'left_hand', and 'right_hand' landmarks
+            
+        Returns:
+            Dictionary with normalized landmarks
+        """
+        # First perform the unified normalization to get the body and hands
+        # in the same coordinate system
+        normalized = self._normalize_landmarks_unified(landmarks)
+        
+        # Then refine the hand normalizations using their respective wrists
+        # Find left and right wrist positions (already normalized)
+        left_wrist = next((lm for lm in normalized['left_hand'] if lm['indices'] == 0), None)
+        right_wrist = next((lm for lm in normalized['right_hand'] if lm['indices'] == 0), None)
+        
+        # Normalize left hand shape if we have valid data
+        if left_wrist and left_wrist['visibility'] > 0.1:
+            # Find left middle finger MCP joint (already normalized)
+            left_middle_mcp = next((lm for lm in normalized['left_hand'] if lm['indices'] == 9), None)
+            
+            if left_middle_mcp and left_middle_mcp['visibility'] > 0.1:
+                # Calculate hand scale factor based on distance wrist to middle MCP
+                dx = left_middle_mcp['x'] - left_wrist['x']
+                dy = left_middle_mcp['y'] - left_wrist['y']
+                left_hand_scale = (dx**2 + dy**2)**0.5
+                
+                if left_hand_scale > 0.01:  # Avoid division by near-zero
+                    # Calculate hand angle for rotation normalization
+                    left_hand_angle = math.atan2(dy, dx)
+                    
+                    # Keep wrist position the same but normalize hand shape
+                    wrist_x = left_wrist['x']
+                    wrist_y = left_wrist['y']
+                    
+                    for i, lm in enumerate(normalized['left_hand']):
+                        if lm['indices'] == 0 or lm['visibility'] < 0.1:
+                            continue  # Skip wrist and invisible points
+                        
+                        # Translate to make wrist the origin
+                        rel_x = lm['x'] - left_wrist['x']
+                        rel_y = lm['y'] - left_wrist['y']
+                        
+                        # Rotate to standardize hand orientation
+                        rot_x = rel_x * math.cos(-left_hand_angle) - rel_y * math.sin(-left_hand_angle)
+                        rot_y = rel_x * math.sin(-left_hand_angle) + rel_y * math.cos(-left_hand_angle)
+                        
+                        # Scale by hand size but preserve overall position
+                        lm['x'] = wrist_x + (rot_x / left_hand_scale)
+                        lm['y'] = wrist_y + (rot_y / left_hand_scale)
+        
+        # Normalize right hand shape if we have valid data
+        if right_wrist and right_wrist['visibility'] > 0.1:
+            # Find right middle finger MCP joint (already normalized)
+            right_middle_mcp = next((lm for lm in normalized['right_hand'] if lm['indices'] == 9), None)
+            
+            if right_middle_mcp and right_middle_mcp['visibility'] > 0.1:
+                # Calculate hand scale factor based on distance wrist to middle MCP
+                dx = right_middle_mcp['x'] - right_wrist['x']
+                dy = right_middle_mcp['y'] - right_wrist['y']
+                right_hand_scale = (dx**2 + dy**2)**0.5
+                
+                if right_hand_scale > 0.01:  # Avoid division by near-zero
+                    # Calculate hand angle for rotation normalization
+                    right_hand_angle = math.atan2(dy, dx)
+                    
+                    # Keep wrist position the same but normalize hand shape
+                    wrist_x = right_wrist['x']
+                    wrist_y = right_wrist['y']
+                    
+                    for i, lm in enumerate(normalized['right_hand']):
+                        if lm['indices'] == 0 or lm['visibility'] < 0.1:
+                            continue  # Skip wrist and invisible points
+                        
+                        # Translate to make wrist the origin
+                        rel_x = lm['x'] - right_wrist['x']
+                        rel_y = lm['y'] - right_wrist['y']
+                        
+                        # Rotate to standardize hand orientation
+                        rot_x = rel_x * math.cos(-right_hand_angle) - rel_y * math.sin(-right_hand_angle)
+                        rot_y = rel_x * math.sin(-right_hand_angle) + rel_y * math.cos(-right_hand_angle)
+                        
+                        # Scale by hand size but preserve overall position
+                        lm['x'] = wrist_x + (rot_x / right_hand_scale)
+                        lm['y'] = wrist_y + (rot_y / right_hand_scale)
+        
+        return normalized
+
+
     def parse_frame(self, frame):
         """Parse a single frame of landmarks into a flat list of features"""
         keypoints = []
@@ -361,7 +543,7 @@ class RealtimeSignLanguageProcessor:
         
         # Extract landmarks
         if results is not None:
-            landmarks = self.extract_landmarks(results)
+            landmarks = self.extract_landmarks_normalized(results)
             
             # Add to buffer
             keypoints = self.parse_frame(landmarks)
@@ -526,14 +708,17 @@ class SignLanguagePreprocessor:
             for landmark in frame.get(part, []):
                 keypoints.append([landmark['x'], landmark['y'],landmark['visibility']])
         return keypoints
-    
-    def save_plot(self,landmarks,path):
+    def save_plot(self,landmarks,path,normalized=False):
         keypoints = self.parse_frame(landmarks)
         fig = plt.figure(figsize=(15, 8))
         ax1 = fig.add_subplot(121)
-        ax1.set_title('2D View of MediaPipe Landmarks')
-        ax1.set_xlim(0, 1)
-        ax1.set_ylim(1.0, 0) 
+        if normalized:
+            ax1.set_title('2D View of MediaPipe Landmarks Normalized')
+        else: ax1.set_title('2D View of MediaPipe Landmarks')
+        ax1.invert_yaxis()
+        if not normalized:
+            ax1.set_xlim(0, 1)
+            ax1.set_ylim(1.0, 0) 
         ax1.grid(True, alpha=0.3)
         x = [coord[0] for coord in keypoints]
         y = [coord[1] for coord in keypoints]
@@ -923,11 +1108,13 @@ class SignLanguagePreprocessor:
             return False
         
         # Extract base landmarks
-        base_landmarks = self.extract_landmarks(base_results)
+        base_landmarks = self.extract_landmarks_normalized(base_results)
         
         if self.debug_mode and base_landmarks:
             savepath = os.path.join(debug_class_dir, f"{base_name}_plot.jpg")
-            self.save_plot(base_landmarks,savepath)
+            savepath_norm = os.path.join(debug_class_dir, f"{base_name}_normalized_plot.jpg")
+            self.save_plot(self.extract_landmarks(base_results),savepath)
+            self.save_plot(base_landmarks,savepath_norm,normalized=True)
 
         # Generate frames with subtle noise
         for i in range(self.static_frames):
@@ -1046,7 +1233,7 @@ class SignLanguagePreprocessor:
                     continue
                 
                 # Extract landmarks
-                frame_landmarks = self.extract_landmarks(results)
+                frame_landmarks = self.extract_landmarks_normalized(results)
                 sequence_data.append(frame_landmarks)
                 
                 frame_count += 1
@@ -1070,7 +1257,7 @@ class SignLanguagePreprocessor:
         else:
             print(f"No valid frames with sufficient hand landmarks found in {video_path}")
             return False
-    
+
     def extract_landmarks(self, results):
         """
         Extract key landmarks from MediaPipe results
@@ -1100,7 +1287,6 @@ class SignLanguagePreprocessor:
             23, 24
         ]
         if results.pose_landmarks:
-            
             for idx in pose_indices:
                 if idx < len(results.pose_landmarks.landmark):
                     landmark = results.pose_landmarks.landmark[idx]
@@ -1165,7 +1351,186 @@ class SignLanguagePreprocessor:
             landmarks['right_hand'] = [{'indices':i,'x': 0.0, 'y': 0.0, 'visibility': 0.0} for i in range(21)]
         
         return landmarks
-    
+    def extract_landmarks_normalized(self, results):
+        """
+        Extract key landmarks from MediaPipe results and normalize them 
+        with a unified coordinate system that preserves relationships
+        between hands and body
+        
+        Args:
+            results: MediaPipe Holistic results
+            
+        Returns:
+            Dictionary containing normalized landmarks for face, pose, left hand, and right hand
+        """
+        # First, extract the original landmarks
+        landmarks = self.extract_landmarks(results)
+        
+        # Then perform unified normalization
+        normalized_landmarks = self._normalize_landmarks_unified(landmarks)
+        
+        return normalized_landmarks
+
+    def _normalize_landmarks_unified(self, landmarks):
+        """
+        Normalize all landmarks using a unified coordinate system
+        based on the shoulder width and midpoint
+        
+        Args:
+            landmarks: Dictionary with 'pose', 'left_hand', and 'right_hand' landmarks
+            
+        Returns:
+            Dictionary with unified normalized landmarks
+        """
+        # Create a copy of the original landmarks
+        normalized = {
+            'pose': [lm.copy() for lm in landmarks['pose']],
+            'left_hand': [lm.copy() for lm in landmarks['left_hand']],
+            'right_hand': [lm.copy() for lm in landmarks['right_hand']]
+        }
+        
+        # Find left and right shoulder landmarks (indices 11 and 12)
+        left_shoulder = next((lm for lm in landmarks['pose'] if lm['indices'] == 11), None)
+        right_shoulder = next((lm for lm in landmarks['pose'] if lm['indices'] == 12), None)
+        
+        # If shoulders are not visible, try to use the neck/nose point
+        if not left_shoulder or not right_shoulder or left_shoulder['visibility'] < 0.1 or right_shoulder['visibility'] < 0.1:
+            # Use nose (index 0) as reference if available
+            nose = next((lm for lm in landmarks['pose'] if lm['indices'] == 0), None)
+            if nose and nose['visibility'] > 0.1:
+                # Create an artificial reference frame based on the nose
+                mid_x = nose['x']
+                mid_y = nose['y']
+                # Use a default scale based on an average proportion
+                scale = 0.2  # Typical proportion of shoulder width to frame width
+            else:
+                # Cannot normalize without any reference points
+                return landmarks
+        else:
+            # Calculate the midpoint between shoulders as the origin
+            mid_x = (left_shoulder['x'] + right_shoulder['x']) / 2
+            mid_y = (left_shoulder['y'] + right_shoulder['y']) / 2
+            
+            # Calculate the scale factor based on shoulder width
+            scale = ((left_shoulder['x'] - right_shoulder['x'])**2 + 
+                    (left_shoulder['y'] - right_shoulder['y'])**2)**0.5
+        
+        if scale < 0.01:  # Avoid division by near-zero
+            scale = 0.2  # Use a default scale
+        
+        # Determine overall orientation (optional)
+        # We could calculate the angle of the shoulders and rotate everything
+        # to standardize the orientation, but this might not be necessary for ASL
+        # since the person is typically facing the camera
+        
+        # Normalize all landmarks in a unified way
+        for category in ['pose', 'left_hand', 'right_hand']:
+            for i, lm in enumerate(landmarks[category]):
+                if lm['visibility'] < 0.1:
+                    continue
+                    
+                # Store original coordinates
+                normalized[category][i]['original_x'] = lm['x']
+                normalized[category][i]['original_y'] = lm['y']
+                
+                # Translate relative to shoulder midpoint and scale by shoulder width
+                normalized[category][i]['x'] = (lm['x'] - mid_x) / scale
+                normalized[category][i]['y'] = (lm['y'] - mid_y) / scale
+        
+        return normalized
+
+    def normalize_hands_with_wrists(self, landmarks):
+        """
+        An alternative normalization that preserves hand shapes while
+        still maintaining the relationship between hands and body
+        
+        Args:
+            landmarks: Dictionary with 'pose', 'left_hand', and 'right_hand' landmarks
+            
+        Returns:
+            Dictionary with normalized landmarks
+        """
+        # First perform the unified normalization to get the body and hands
+        # in the same coordinate system
+        normalized = self._normalize_landmarks_unified(landmarks)
+        
+        # Then refine the hand normalizations using their respective wrists
+        # Find left and right wrist positions (already normalized)
+        left_wrist = next((lm for lm in normalized['left_hand'] if lm['indices'] == 0), None)
+        right_wrist = next((lm for lm in normalized['right_hand'] if lm['indices'] == 0), None)
+        
+        # Normalize left hand shape if we have valid data
+        if left_wrist and left_wrist['visibility'] > 0.1:
+            # Find left middle finger MCP joint (already normalized)
+            left_middle_mcp = next((lm for lm in normalized['left_hand'] if lm['indices'] == 9), None)
+            
+            if left_middle_mcp and left_middle_mcp['visibility'] > 0.1:
+                # Calculate hand scale factor based on distance wrist to middle MCP
+                dx = left_middle_mcp['x'] - left_wrist['x']
+                dy = left_middle_mcp['y'] - left_wrist['y']
+                left_hand_scale = (dx**2 + dy**2)**0.5
+                
+                if left_hand_scale > 0.01:  # Avoid division by near-zero
+                    # Calculate hand angle for rotation normalization
+                    left_hand_angle = math.atan2(dy, dx)
+                    
+                    # Keep wrist position the same but normalize hand shape
+                    wrist_x = left_wrist['x']
+                    wrist_y = left_wrist['y']
+                    
+                    for i, lm in enumerate(normalized['left_hand']):
+                        if lm['indices'] == 0 or lm['visibility'] < 0.1:
+                            continue  # Skip wrist and invisible points
+                        
+                        # Translate to make wrist the origin
+                        rel_x = lm['x'] - left_wrist['x']
+                        rel_y = lm['y'] - left_wrist['y']
+                        
+                        # Rotate to standardize hand orientation
+                        rot_x = rel_x * math.cos(-left_hand_angle) - rel_y * math.sin(-left_hand_angle)
+                        rot_y = rel_x * math.sin(-left_hand_angle) + rel_y * math.cos(-left_hand_angle)
+                        
+                        # Scale by hand size but preserve overall position
+                        lm['x'] = wrist_x + (rot_x / left_hand_scale)
+                        lm['y'] = wrist_y + (rot_y / left_hand_scale)
+        
+        # Normalize right hand shape if we have valid data
+        if right_wrist and right_wrist['visibility'] > 0.1:
+            # Find right middle finger MCP joint (already normalized)
+            right_middle_mcp = next((lm for lm in normalized['right_hand'] if lm['indices'] == 9), None)
+            
+            if right_middle_mcp and right_middle_mcp['visibility'] > 0.1:
+                # Calculate hand scale factor based on distance wrist to middle MCP
+                dx = right_middle_mcp['x'] - right_wrist['x']
+                dy = right_middle_mcp['y'] - right_wrist['y']
+                right_hand_scale = (dx**2 + dy**2)**0.5
+                
+                if right_hand_scale > 0.01:  # Avoid division by near-zero
+                    # Calculate hand angle for rotation normalization
+                    right_hand_angle = math.atan2(dy, dx)
+                    
+                    # Keep wrist position the same but normalize hand shape
+                    wrist_x = right_wrist['x']
+                    wrist_y = right_wrist['y']
+                    
+                    for i, lm in enumerate(normalized['right_hand']):
+                        if lm['indices'] == 0 or lm['visibility'] < 0.1:
+                            continue  # Skip wrist and invisible points
+                        
+                        # Translate to make wrist the origin
+                        rel_x = lm['x'] - right_wrist['x']
+                        rel_y = lm['y'] - right_wrist['y']
+                        
+                        # Rotate to standardize hand orientation
+                        rot_x = rel_x * math.cos(-right_hand_angle) - rel_y * math.sin(-right_hand_angle)
+                        rot_y = rel_x * math.sin(-right_hand_angle) + rel_y * math.cos(-right_hand_angle)
+                        
+                        # Scale by hand size but preserve overall position
+                        lm['x'] = wrist_x + (rot_x / right_hand_scale)
+                        lm['y'] = wrist_y + (rot_y / right_hand_scale)
+        
+        return normalized
+
     def add_subtle_noise(self, base_landmarks, noise_factor=0.002):
         """
         Add subtle noise to landmarks to create variation between frames
@@ -1193,7 +1558,6 @@ class SignLanguagePreprocessor:
                 # Add noise to x, y, z coordinates
                 noise_x = random.uniform(-noise_factor, noise_factor)
                 noise_y = random.uniform(-noise_factor, noise_factor)
-                noise_z = random.uniform(-noise_factor, noise_factor)
                 
                 noisy_landmarks[key].append({
                     'indices': landmark['indices'],
@@ -1259,6 +1623,7 @@ def parse_frame(frame):
         for landmark in frame.get(part, []):
             keypoints.append([landmark['x'], landmark['y'],landmark['visibility']])
     return keypoints
+
 
 def load_and_preprocess_data(data_dir):
     """
