@@ -271,7 +271,7 @@ class RealtimeSignLanguageProcessor:
             'left_hand': [],
             'right_hand': []
         }
-        # Extract pose landmarks (arms, chest, shoulders)
+        # Extract pose landmarks (arms, chest, shoulders, faces)
         if results.pose_landmarks:
             for idx in self.pose_indices:
                 if idx < len(results.pose_landmarks.landmark):
@@ -1417,11 +1417,6 @@ class SignLanguagePreprocessor:
         
         if scale < 0.01:  # Avoid division by near-zero
             scale = 0.2  # Use a default scale
-        
-        # Determine overall orientation (optional)
-        # We could calculate the angle of the shoulders and rotate everything
-        # to standardize the orientation, but this might not be necessary for ASL
-        # since the person is typically facing the camera
         
         # Normalize all landmarks in a unified way
         for category in ['pose', 'left_hand', 'right_hand']:

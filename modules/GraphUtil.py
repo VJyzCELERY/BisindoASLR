@@ -4,7 +4,7 @@ import torch
 
 
 def create_norm_adjacency_matrix():
-    """Create the adjacency matrix for the graph."""
+    """Create the normalized adjacency matrix for the graph."""
     
     def create_adj_matrix(num_nodes, connections):
         adj_matrix = np.zeros((num_nodes, num_nodes))

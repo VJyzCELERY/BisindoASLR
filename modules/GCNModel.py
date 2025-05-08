@@ -9,14 +9,14 @@ FEATURE_DIM = Constants.FEATURE_DIM
 class GCNLayer(nn.Module):
     def __init__(self, in_features, out_features,dropout=0.5):
         super(GCNLayer, self).__init__()
-        # self.linear = nn.Linear(in_features, out_features,bias=True)
         self.conv = nn.Conv1d(in_features, out_features, kernel_size=1, bias=True)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, adj):
-        # x: (batch_size * seq_len, num_nodes, in_features)
-        # adj: (num_nodes, num_nodes) - shared across all samples
-        
+        """
+        x: (batch_size * seq_len, num_nodes, in_features)\n
+        adj: (num_nodes, num_nodes) - shared across all samples
+        """
         # Ensure adj is on the same device as x
         if adj.device != x.device:
             adj = adj.to(x.device)
@@ -87,8 +87,11 @@ class GCNBiLSTM(nn.Module):
         self.gcn_hidden = gcn_hidden
 
     def forward(self, x, adj):
-        # x shape: (batch_size, seq_len, num_nodes * in_features)
-        # Reshape to (batch_size, seq_len, num_nodes, in_features)
+        """
+        x shape: (batch_size, seq_len, num_nodes * in_features)\n
+        Reshape to (batch_size, seq_len, num_nodes, in_features)
+        """
+        
         batch_size, seq_len, _ = x.size()
         x = x.view(batch_size, seq_len, self.num_nodes, -1)
         
@@ -129,7 +132,7 @@ class GCNBiLSTM(nn.Module):
         self.eval() 
         with torch.no_grad():
             logits = self.forward(x, adj)  # Forward pass
-            pred_classes = torch.argmax(logits, dim=1)  # Get the predicted class (index)
+            pred_classes = torch.argmax(logits, dim=1)
             
             if self.label_map is not None:
                 pred_labels = [self.label_map[int(idx)] for idx in pred_classes.cpu().numpy()]
