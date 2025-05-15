@@ -15,7 +15,7 @@ from collections import deque
 import matplotlib.pyplot as plt
 from modules.GraphUtil import create_norm_adjacency_matrix,create_adjacency_matrix
 from modules.GCNModel import GCNBiLSTM
-from modules.Constants import NUM_NODES,FEATURE_DIM,pose_connections,hand_connections
+from modules.Constants import NUM_NODES,FEATURE_DIM,pose_indices
 from sklearn.preprocessing import LabelEncoder
 
 class RealtimeSignLanguageProcessor:
@@ -44,19 +44,7 @@ class RealtimeSignLanguageProcessor:
         self.model = None
         if model_path and os.path.exists(model_path):
             self.load_model(model_path)
-        
-        # Initialize pose indices for extraction
-        self.pose_indices = [
-            # Faces
-            0,1,2,3,4,5,6,7,8,9,10,
-            # Shoulders
-            11, 12,
-            # Arms
-            13, 14, 15, 16,
-            # Chest
-            23, 24
-        ]
-        
+          
         # For UI purposes
         self.current_prediction = None
         self.prediction_confidence = 0.0
@@ -66,8 +54,7 @@ class RealtimeSignLanguageProcessor:
     def load_model(self, model_path):
         checkpoint = torch.load(model_path)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # Initialize the model with the correct num_classes from label_encoder
-        num_classes = len(checkpoint['label_map'])  # Get the number of classes from the label encoder
+        num_classes = len(checkpoint['label_map'])
         
         self.model = GCNBiLSTM(
             num_nodes=NUM_NODES,
@@ -88,46 +75,35 @@ class RealtimeSignLanguageProcessor:
         
     def enhance_image(self, image):
         """Apply image enhancement techniques to improve hand detection"""
-        # Convert to LAB color space and CLAHE to improve contrast
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         
-        # Apply CLAHE to L channel
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         cl = clahe.apply(l)
         
-        # Merge channels back
         limg = cv2.merge((cl, a, b))
         
-        # Convert back to BGR
         enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
         
-        # Apply slight Gaussian blur to reduce noise
         enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
         
         return enhanced
     
     def detect_skin(self, image):
         """Create a skin mask to help with hand segmentation"""
-        # Convert to HSV color space
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Define range for skin color in HSV
         lower_skin = np.array([0, 20, 70], dtype=np.uint8)
         upper_skin = np.array([20, 255, 255], dtype=np.uint8)
         
-        # Create mask
         mask1 = cv2.inRange(hsv, lower_skin, upper_skin)
         
-        # Second range for skin detection
         lower_skin2 = np.array([170, 20, 70], dtype=np.uint8)
         upper_skin2 = np.array([180, 255, 255], dtype=np.uint8)
         mask2 = cv2.inRange(hsv, lower_skin2, upper_skin2)
         
-        # Combine masks
         skin_mask = cv2.bitwise_or(mask1, mask2)
         
-        # Apply morphological operations to clean up the mask
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel)
         skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
@@ -136,20 +112,16 @@ class RealtimeSignLanguageProcessor:
     
     def apply_skin_mask(self, image):
         """Apply skin mask to isolate hands in the image"""
-        # Get skin mask
+        
         skin_mask = self.detect_skin(image)
         
-        # Dilate mask slightly to ensure hands are fully covered
         kernel = np.ones((5, 5), np.uint8)
         dilated_mask = cv2.dilate(skin_mask, kernel, iterations=1)
         
-        # Create a dimmed version of the original image for background
         dimmed = cv2.addWeighted(image, 0.3, np.zeros_like(image), 0.7, 0)
         
-        # Create output image
         result = dimmed.copy()
         
-        # Copy the original image where mask is set
         result[dilated_mask > 0] = image[dilated_mask > 0]
         
         return result
@@ -159,10 +131,8 @@ class RealtimeSignLanguageProcessor:
         if hand_landmarks is None:
             return False
         
-        # Count visible landmarks
         visible_count = 0
         for landmark in hand_landmarks.landmark:
-            # Consider a landmark valid if it has reasonable x,y coordinates
             if 0 <= landmark.x <= 1 and 0 <= landmark.y <= 1:
                 visible_count += 1
         
@@ -175,8 +145,8 @@ class RealtimeSignLanguageProcessor:
         
         # Try with holistic model first
         with self.mp_holistic.Holistic(
-            static_image_mode=False,  # Set to False for video
-            model_complexity=1,  # Use 1 for real-time
+            static_image_mode=False, 
+            model_complexity=1,  
             min_detection_confidence=0.6) as holistic:
             
             holistic_results = holistic.process(image_rgb)
@@ -234,7 +204,6 @@ class RealtimeSignLanguageProcessor:
         
         # Try with enhanced image if we still don't have enough landmarks
         if visible_landmarks_count < min_finger_landmarks * 2:
-            # Apply skin mask to isolate hands
             enhanced_image = self.apply_skin_mask(cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
             enhanced_image_rgb = cv2.cvtColor(enhanced_image, cv2.COLOR_BGR2RGB)
             
@@ -271,9 +240,8 @@ class RealtimeSignLanguageProcessor:
             'left_hand': [],
             'right_hand': []
         }
-        # Extract pose landmarks (arms, chest, shoulders, faces)
         if results.pose_landmarks:
-            for idx in self.pose_indices:
+            for idx in pose_indices:
                 if idx < len(results.pose_landmarks.landmark):
                     landmark = results.pose_landmarks.landmark[idx]
                     landmarks['pose'].append({
@@ -283,14 +251,11 @@ class RealtimeSignLanguageProcessor:
                         'visibility': landmark.visibility
                     })
         else:
-            # Set neutral state for pose
             landmarks['pose'] = [{'indices': idx, 'x': 0.0, 'y': 0.0, 'visibility': 0.0} 
-                                for idx in self.pose_indices]
+                                for idx in pose_indices]
         
-        # Extract left hand landmarks - even if only partial
         if results.left_hand_landmarks:
             for i, landmark in enumerate(results.left_hand_landmarks.landmark):
-                # Check if this landmark is valid
                 is_valid = (0 <= landmark.x <= 1 and 0 <= landmark.y <= 1)
                 
                 if is_valid:
@@ -301,7 +266,6 @@ class RealtimeSignLanguageProcessor:
                         'visibility': 1.0
                     })
                 else:
-                    # For invalid landmarks, set with reduced visibility
                     landmarks['left_hand'].append({
                         'indices': i,
                         'x': 0.0,
@@ -309,14 +273,11 @@ class RealtimeSignLanguageProcessor:
                         'visibility': 0.0
                     })
         else:
-            # Set neutral state for left hand
             landmarks['left_hand'] = [{'indices': i, 'x': 0.0, 'y': 0.0, 'visibility': 0.0} 
                                      for i in range(21)]
         
-        # Extract right hand landmarks - even if only partial
         if results.right_hand_landmarks:
             for i, landmark in enumerate(results.right_hand_landmarks.landmark):
-                # Check if this landmark is valid
                 is_valid = (0 <= landmark.x <= 1 and 0 <= landmark.y <= 1)
                 
                 if is_valid:
@@ -327,7 +288,6 @@ class RealtimeSignLanguageProcessor:
                         'visibility': 1.0
                     })
                 else:
-                    # For invalid landmarks, set with reduced visibility
                     landmarks['right_hand'].append({
                         'indices': i+21,
                         'x': 0.0,
@@ -335,7 +295,6 @@ class RealtimeSignLanguageProcessor:
                         'visibility': 0.0
                     })
         else:
-            # Set neutral state for right hand
             landmarks['right_hand'] = [{'indices': i+21, 'x': 0.0, 'y': 0.0, 'visibility': 0.0} 
                                       for i in range(21)]
         
@@ -353,10 +312,8 @@ class RealtimeSignLanguageProcessor:
         Returns:
             Dictionary containing normalized landmarks for face, pose, left hand, and right hand
         """
-        # First, extract the original landmarks
         landmarks = self.extract_landmarks(results)
         
-        # Then perform unified normalization
         normalized_landmarks = self._normalize_landmarks_unified(landmarks)
         
         return normalized_landmarks
@@ -407,11 +364,6 @@ class RealtimeSignLanguageProcessor:
         
         if scale < 0.01:  # Avoid division by near-zero
             scale = 0.2  # Use a default scale
-        
-        # Determine overall orientation (optional)
-        # We could calculate the angle of the shoulders and rotate everything
-        # to standardize the orientation, but this might not be necessary for ASL
-        # since the person is typically facing the camera
         
         # Normalize all landmarks in a unified way
         for category in ['pose', 'left_hand', 'right_hand']:
@@ -532,20 +484,15 @@ class RealtimeSignLanguageProcessor:
     
     def process_frame(self, frame):
         """Process a single webcam frame"""
-        # Enhance the image
         enhanced_frame = self.enhance_image(frame)
-        
-        # Convert to RGB for MediaPipe
+    
         frame_rgb = cv2.cvtColor(enhanced_frame, cv2.COLOR_BGR2RGB)
         
-        # Process with MediaPipe
         results = self.process_with_multiple_approaches(frame_rgb)
         
-        # Extract landmarks
         if results is not None:
             landmarks = self.extract_landmarks_normalized(results)
             
-            # Add to buffer
             keypoints = self.parse_frame(landmarks)
             self.frame_buffer.append(keypoints)
             
@@ -572,16 +519,11 @@ class RealtimeSignLanguageProcessor:
         model_device = next(self.model.parameters()).device
         sequence_tensor = sequence_tensor.to(model_device)
         adj_tensor = self.adj_tensor.to(model_device)
-        # Make prediction
         with torch.no_grad():
             logits = self.model(sequence_tensor, adj_tensor)
             probs = F.softmax(logits, dim=1)
             confidence, pred_class = torch.max(probs, dim=1)
-            
-            # Update prediction info
-            
             self.current_prediction = f"{pred_class.item()}"
-                
             self.prediction_confidence = confidence.item()
             self.prediction_time = time.time()
     
@@ -590,14 +532,12 @@ class RealtimeSignLanguageProcessor:
         if results is None:
             return
         
-        # Define drawing styles
         pose_landmark_style = self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2)
         pose_connection_style = self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=1)
         
         hand_landmark_style = self.mp_drawing.DrawingSpec(color=(255, 0, 255), thickness=2, circle_radius=2)
         hand_connection_style = self.mp_drawing.DrawingSpec(color=(255, 0, 255), thickness=1)
 
-        # Draw pose landmarks
         if results.pose_landmarks:
             self.mp_drawing.draw_landmarks(
                 image,
@@ -607,7 +547,6 @@ class RealtimeSignLanguageProcessor:
                 connection_drawing_spec=pose_connection_style
             )
 
-        # Draw left hand landmarks
         if results.left_hand_landmarks:
             self.mp_drawing.draw_landmarks(
                 image,
@@ -617,7 +556,6 @@ class RealtimeSignLanguageProcessor:
                 connection_drawing_spec=hand_connection_style
             )
 
-        # Draw right hand landmarks
         if results.right_hand_landmarks:
             self.mp_drawing.draw_landmarks(
                 image,
@@ -631,29 +569,22 @@ class RealtimeSignLanguageProcessor:
         """Draw prediction text on image"""
         h, w, _ = image.shape
         
-        # Display buffer status
         buffer_text = f"Buffer: {len(self.frame_buffer)}/{self.sequence_length}"
         cv2.putText(image, buffer_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        # Display prediction if available
         if self.current_prediction:
-            # Calculate time since last prediction
             elapsed = time.time() - self.prediction_time
             
-            # Display prediction for 3 seconds with fade-out
             if elapsed < 3.0:
                 alpha = 1.0 - (elapsed / 3.0)
                 
-                # Draw prediction with confidence
                 prediction_text = f"Sign: {self.label_map[int(self.current_prediction)]}"
                 confidence_text = f"Confidence: {self.prediction_confidence:.2f}"
                 
-                # Create overlay for prediction
                 overlay = image.copy()
                 cv2.rectangle(overlay, (10, h - 90), (320, h - 10), (0, 0, 0), -1)
                 cv2.addWeighted(overlay, 0.5 * alpha, image, 1 - 0.5 * alpha, 0, image)
                 
-                # Add text
                 cv2.putText(image, prediction_text, (20, h - 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
                 cv2.putText(image, confidence_text, (20, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
@@ -693,10 +624,8 @@ class SignLanguagePreprocessor:
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         
-        # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Create debug directory if needed
         self.debug_dir = os.path.join(self.output_dir, "debug")
         if self.debug_mode:
             os.makedirs(self.debug_dir, exist_ok=True)
@@ -739,13 +668,10 @@ class SignLanguagePreprocessor:
         gc.collect()
 
     def resize_image(self,image):
-        # Get the original image dimensions
         h, w = image.shape[:2]
         
-        # Calculate the aspect ratio
         aspect_ratio = w / h
         
-        # Resize the image while maintaining the aspect ratio
         if aspect_ratio > 1:
             new_w = self.target_width
             new_h = int(self.target_width / aspect_ratio)
@@ -755,13 +681,11 @@ class SignLanguagePreprocessor:
         
         resized_image = cv2.resize(image, (new_w, new_h))
         
-        # Add padding if necessary
         top_padding = (self.target_height - new_h) // 2
         bottom_padding = self.target_height - new_h - top_padding
         left_padding = (self.target_width - new_w) // 2
         right_padding = self.target_width - new_w - left_padding
         
-        # Add padding to make the image the desired size
         padded_image = cv2.copyMakeBorder(
             resized_image, top_padding, bottom_padding, left_padding, right_padding, 
             cv2.BORDER_CONSTANT, value=(0, 0, 0)
@@ -789,12 +713,10 @@ class SignLanguagePreprocessor:
             output_class_path = os.path.join(self.output_dir, class_dir)
             os.makedirs(output_class_path, exist_ok=True)
             
-            # Create debug directory for this class if needed
             if self.debug_mode:
                 class_debug_dir = os.path.join(self.debug_dir, class_dir)
                 os.makedirs(class_debug_dir, exist_ok=True)
             
-            # Get all files in the class directory
             files = glob.glob(os.path.join(class_path, '*.*'))
             total_files += len(files)
             
@@ -831,7 +753,6 @@ class SignLanguagePreprocessor:
         if not self.enhanced_detection:
             return image
 
-        # Apply slight Gaussian blur to reduce noise
         enhanced = cv2.GaussianBlur(image, (5, 5), 0)
         
         return enhanced
@@ -846,25 +767,19 @@ class SignLanguagePreprocessor:
         Returns:
             Mask of skin regions
         """
-        # Convert to HSV color space
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Define range for skin color in HSV
         lower_skin = np.array([0, 20, 70], dtype=np.uint8)
         upper_skin = np.array([20, 255, 255], dtype=np.uint8)
         
-        # Create mask
         mask1 = cv2.inRange(hsv, lower_skin, upper_skin)
         
-        # Second range for skin detection
         lower_skin2 = np.array([170, 20, 70], dtype=np.uint8)
         upper_skin2 = np.array([180, 255, 255], dtype=np.uint8)
         mask2 = cv2.inRange(hsv, lower_skin2, upper_skin2)
         
-        # Combine masks
         skin_mask = cv2.bitwise_or(mask1, mask2)
         
-        # Apply morphological operations to clean up the mask
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel)
         skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
@@ -884,20 +799,11 @@ class SignLanguagePreprocessor:
         if not self.enhanced_detection:
             return image
         
-        # Get skin mask
         skin_mask = self.detect_skin(image)
-        
-        # Dilate mask slightly to ensure hands are fully covered
         kernel = np.ones((5, 5), np.uint8)
         dilated_mask = cv2.dilate(skin_mask, kernel, iterations=1)
-        
-        # Create a dimmed version of the original image for background
         dimmed = cv2.addWeighted(image, 0.3, np.zeros_like(image), 0.7, 0)
-        
-        # Create output image
         result = dimmed.copy()
-        
-        # Copy the original image where mask is set
         result[dilated_mask > 0] = image[dilated_mask > 0]
         
         return result
@@ -968,12 +874,11 @@ class SignLanguagePreprocessor:
             gc.collect()
         
         # Try the dedicated hands model if we don't have enough landmarks
-        if visible_landmarks_count < self.min_finger_landmarks * 2:  # Try to get more landmarks
+        if visible_landmarks_count < self.min_finger_landmarks * 2:  
             with self.mp_hands.Hands(
                 static_image_mode=True,
                 max_num_hands=2,
-                min_detection_confidence=self.min_hand_confidence) as hands:  # Lower threshold to catch partial hands
-                
+                min_detection_confidence=self.min_hand_confidence) as hands:
                 hands_results = hands.process(image_rgb)
                 
                 # If hands were detected
@@ -1014,7 +919,7 @@ class SignLanguagePreprocessor:
             with self.mp_holistic.Holistic(
                 static_image_mode=True, 
                 model_complexity=2,
-                min_detection_confidence=self.min_hand_confidence) as holistic:  # Lower threshold for enhanced image
+                min_detection_confidence=self.min_hand_confidence) as holistic:  
                 
                 enhanced_results = holistic.process(enhanced_image_rgb)
                 
@@ -1056,7 +961,6 @@ class SignLanguagePreprocessor:
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         output_file = os.path.join(output_dir, f"{base_name}_landmarks.json")
         
-        # Skip if already processed
         if os.path.exists(output_file):
             print("Data already exists. Skipping . . .")
             return True
@@ -1077,18 +981,12 @@ class SignLanguagePreprocessor:
         # Apply enhancement
         enhanced_image = self.enhance_image(image)
         
-        # Convert to RGB
         image_rgb = cv2.cvtColor(enhanced_image, cv2.COLOR_BGR2RGB)
         height, width, channels = image_rgb.shape
         if (height != self.target_height) or (width != self.target_width):
             image_rgb = self.resize_image(image_rgb)
-        # Create sequence data with subtle noise
         sequence_data = []
-        
-        # Process with multiple approaches
         base_results = self.process_with_multiple_approaches(image_rgb)
-        # Create debug image
-        # if self.debug_mode and base_results:
         if self.debug_mode and base_results:
             debug_image = image.copy()
             print("Attempting to draw image")
@@ -1096,7 +994,6 @@ class SignLanguagePreprocessor:
             cv2.imwrite(os.path.join(debug_class_dir, f"{base_name}_landmarks.jpg"), debug_image)
             del debug_image
         
-        # Check if we have sufficient finger landmarks (or if we're forcing processing)
         left_has_enough = (base_results and self.has_enough_finger_landmarks(base_results.left_hand_landmarks))
         right_has_enough = (base_results and self.has_enough_finger_landmarks(base_results.right_hand_landmarks))
         
@@ -1107,7 +1004,6 @@ class SignLanguagePreprocessor:
         if base_results == None:
             return False
         
-        # Extract base landmarks
         base_landmarks = self.extract_landmarks_normalized(base_results)
         
         if self.debug_mode and base_landmarks:
@@ -1116,13 +1012,10 @@ class SignLanguagePreprocessor:
             self.save_plot(self.extract_landmarks(base_results),savepath)
             self.save_plot(base_landmarks,savepath_norm,normalized=True)
 
-        # Generate frames with subtle noise
         for i in range(self.static_frames):
-            # Add subtle noise to create variation between frames
             frame_landmarks = self.add_subtle_noise(base_landmarks)
             sequence_data.append(frame_landmarks)
         
-        # Save the sequence data
         with open(output_file, 'w') as f:
             json.dump(sequence_data, f)
         del image,image_rgb,enhanced_image
@@ -1144,12 +1037,10 @@ class SignLanguagePreprocessor:
         base_name = os.path.splitext(os.path.basename(video_path))[0]
         output_file = os.path.join(output_dir, f"{base_name}_landmarks.json")
         
-        # Skip if already processed
         if os.path.exists(output_file):
             print("Data already exists. Skipping . . .")
             return True
         
-        # Open the video file
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"Failed to open video: {video_path}")
@@ -1160,7 +1051,6 @@ class SignLanguagePreprocessor:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         debug_frames = []
         
-        # Create debug directory
         if self.debug_mode:
             debug_class_dir = os.path.join(self.debug_dir, os.path.basename(output_dir))
             os.makedirs(debug_class_dir, exist_ok=True)
@@ -1183,18 +1073,14 @@ class SignLanguagePreprocessor:
                     frame_count += 1
                     continue
                 
-                # Apply enhancement
                 enhanced_image = self.enhance_image(image)
                 
-                # Convert to RGB
                 image_rgb = cv2.cvtColor(enhanced_image, cv2.COLOR_BGR2RGB)
                 height, width, channels = image_rgb.shape
                 if (height != self.target_height) or (width != self.target_width):
                     image_rgb = self.resize_image(image_rgb)
-                # Process the frame
                 results = holistic.process(image_rgb)
                 
-                # If no hands detected with holistic or not enough landmarks, try the dedicated hands model
                 left_has_enough = self.has_enough_finger_landmarks(results.left_hand_landmarks)
                 right_has_enough = self.has_enough_finger_landmarks(results.right_hand_landmarks)
                 
@@ -1202,8 +1088,7 @@ class SignLanguagePreprocessor:
                     with self.mp_hands.Hands(
                         static_image_mode=False,
                         max_num_hands=2,
-                        min_detection_confidence=self.min_hand_confidence) as hands:  # Lower threshold to catch partial hands
-                        
+                        min_detection_confidence=self.min_hand_confidence) as hands: 
                         hands_results = hands.process(image_rgb)
                         
                         # If hands were detected
@@ -1223,16 +1108,13 @@ class SignLanguagePreprocessor:
                     self.draw_landmarks_on_image(debug_frame, results)
                     debug_frames.append((frame_count, debug_frame))
                 
-                # Check if we have any hand landmarks
                 left_has_enough = self.has_enough_finger_landmarks(results.left_hand_landmarks)
                 right_has_enough = self.has_enough_finger_landmarks(results.right_hand_landmarks)
                 
-                # Skip frame if we don't have enough landmarks and not forcing process
                 if not left_has_enough and not right_has_enough and not self.force_process:
                     frame_count += 1
                     continue
                 
-                # Extract landmarks
                 frame_landmarks = self.extract_landmarks_normalized(results)
                 sequence_data.append(frame_landmarks)
                 
@@ -1242,13 +1124,11 @@ class SignLanguagePreprocessor:
                 
             cap.release()
         
-        # Save debug frames if any
         if self.debug_mode and debug_frames:
             for frame_num, debug_frame in debug_frames:
                 debug_path = os.path.join(debug_class_dir, f"{base_name}_frame{frame_num}_debug.jpg")
                 cv2.imwrite(debug_path, debug_frame)
         
-        # Save the sequence data if we have any frames
         if sequence_data:
             with open(output_file, 'w') as f:
                 json.dump(sequence_data, f)
@@ -1273,19 +1153,7 @@ class SignLanguagePreprocessor:
             'left_hand': [],
             'right_hand': []
         }
-        
-        # Extract pose landmarks (arms, chest, shoulders)
-        # Selected landmarks for upper body
-        pose_indices = [
-            # Faces
-            0,1,2,3,4,5,6,7,8,9,10,
-            # Shoulders
-            11, 12,
-            # Arms
-            13, 14, 15, 16,
-            # Chest
-            23, 24
-        ]
+    
         if results.pose_landmarks:
             for idx in pose_indices:
                 if idx < len(results.pose_landmarks.landmark):
@@ -1297,13 +1165,10 @@ class SignLanguagePreprocessor:
                         'visibility': landmark.visibility
                     })
         else:
-            # Set neutral state for pose
             landmarks['pose'] = [{'indices':indices,'x': 0.0, 'y': 0.0, 'visibility': 0.0} for indices in pose_indices]
         
-        # Extract left hand landmarks - even if only partial
         if results.left_hand_landmarks:
             for i, landmark in enumerate(results.left_hand_landmarks.landmark):
-                # Check if this landmark is valid
                 is_valid = (0 <= landmark.x <= 1 and 0 <= landmark.y <= 1)
                 
                 if is_valid:
@@ -1314,7 +1179,6 @@ class SignLanguagePreprocessor:
                         'visibility': 1.0
                     })
                 else:
-                    # For invalid landmarks, set with reduced visibility
                     landmarks['left_hand'].append({
                         'indices':i,
                         'x': 0.0,
@@ -1322,13 +1186,10 @@ class SignLanguagePreprocessor:
                         'visibility': 0.0
                     })
         else:
-            # Set neutral state for left hand
             landmarks['left_hand'] = [{'indices':i,'x': 0.0, 'y': 0.0, 'visibility': 0.0} for i in range(21)]
         
-        # Extract right hand landmarks - even if only partial
         if results.right_hand_landmarks:
             for i, landmark in enumerate(results.right_hand_landmarks.landmark):
-                # Check if this landmark is valid
                 is_valid = (0 <= landmark.x <= 1 and 0 <= landmark.y <= 1)
                 
                 if is_valid:
@@ -1339,7 +1200,6 @@ class SignLanguagePreprocessor:
                         'visibility': 1.0
                     })
                 else:
-                    # For invalid landmarks, set with reduced visibility
                     landmarks['right_hand'].append({
                         'indices':i,
                         'x': 0.0,
@@ -1347,7 +1207,6 @@ class SignLanguagePreprocessor:
                         'visibility': 0.0
                     })
         else:
-            # Set neutral state for right hand
             landmarks['right_hand'] = [{'indices':i,'x': 0.0, 'y': 0.0, 'visibility': 0.0} for i in range(21)]
         
         return landmarks
@@ -1363,10 +1222,8 @@ class SignLanguagePreprocessor:
         Returns:
             Dictionary containing normalized landmarks for face, pose, left hand, and right hand
         """
-        # First, extract the original landmarks
         landmarks = self.extract_landmarks(results)
         
-        # Then perform unified normalization
         normalized_landmarks = self._normalize_landmarks_unified(landmarks)
         
         return normalized_landmarks
@@ -1550,7 +1407,7 @@ class SignLanguagePreprocessor:
                     noisy_landmarks[key].append(landmark.copy())
                     continue
                 
-                # Add noise to x, y, z coordinates
+                # Add noise to x, y coordinates
                 noise_x = random.uniform(-noise_factor, noise_factor)
                 noise_y = random.uniform(-noise_factor, noise_factor)
                 
@@ -1636,21 +1493,18 @@ def load_and_preprocess_data(data_dir):
     frame_data = []
     raw_labels = []
     
-    # Step 1: Collect all labels
     for root, dirs, files in os.walk(data_dir):
         for file in files:
             if file.endswith(".json"):
                 label = os.path.basename(os.path.dirname(os.path.join(root, file)))
                 raw_labels.append(label)
     
-    # Step 2: Fit label encoder
     encoder = LabelEncoder()
     encoder.fit(raw_labels)
     label_map = {label: int(encoder.transform([label])[0]) for label in set(raw_labels)}
     
     sequences = []
     sequence_labels = []
-    # Step 3: Parse frames and assign encoded labels
     for root, dirs, files in os.walk(data_dir):
         for file in files:
             if file.endswith(".json"):

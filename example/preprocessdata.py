@@ -8,7 +8,7 @@ if __name__ == "__main__":
     parser.add_argument('--out', type=str, default="data", help='The output dir of preprocessed data')
     args = parser.parse_args()
     raw_data_dir = args.raw
-    output_dir = args.out # This is where the output of the preprocessed data goes
+    output_dir = args.out 
 
     preprocessor = SignLanguagePreprocessor(
         raw_data_dir=raw_data_dir,

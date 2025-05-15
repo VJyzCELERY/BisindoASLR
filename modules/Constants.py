@@ -37,3 +37,14 @@ hand_connections = [
     # Palm connections
     (5, 9), (9, 13), (13, 17)
 ]
+
+pose_indices = [
+    # Faces
+    0,1,2,3,4,5,6,7,8,9,10,
+    # Shoulders
+    11, 12,
+    # Arms
+    13, 14, 15, 16,
+    # Chest
+    23, 24
+]

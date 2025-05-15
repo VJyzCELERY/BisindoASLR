@@ -89,7 +89,6 @@ def train_model(model, train_loader, val_loader, adj_matrix, num_epochs=50, lr=0
             loss = criterion(outputs, targets)
             loss.backward()
             
-            # Optional: gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             
             optimizer.step()
@@ -132,17 +131,14 @@ def train_model(model, train_loader, val_loader, adj_matrix, num_epochs=50, lr=0
         val_losses.append(val_loss)
         val_accs.append(val_acc)
         
-        # Update learning rate
         scheduler.step(val_loss)
         
         print(f"Epoch {epoch+1}/{num_epochs} - "
               f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% - "
               f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
         
-        # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            # Save only the model state dict
             torch.save({'model_state_dict':model.state_dict(),'label_map':model.label_map}, model_save_path)
             
             
@@ -151,12 +147,10 @@ def train_model(model, train_loader, val_loader, adj_matrix, num_epochs=50, lr=0
         else:
             early_stop_counter += 1
             
-        # Early stopping
         if early_stop_counter >= patience:
             print(f"Early stopping triggered after {epoch+1} epochs")
             break
     
-    # Load best model
     checkpoint = torch.load(model_save_path)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.label_map = checkpoint['label_map']
@@ -246,7 +240,6 @@ def main():
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     
-    # 1. Load and preprocess data
     data_dir = "data"  # This is the preprocessed dataset directory
     sequences, sequence_labels, label_map = load_and_preprocess_data(data_dir)
     
@@ -254,8 +247,6 @@ def main():
     print(f'Sequence Label {len(sequence_labels)}')
     print(f"Number of classes: {len(label_map)}")
     
-    # 2. Create adjacency matrix
-
     adj_matrix = create_norm_adjacency_matrix()
     print(f'Unique Label : {len(np.unique(sequence_labels))}')
     X_train,X_val,y_train,y_val = train_test_split(
@@ -270,7 +261,6 @@ def main():
     print(f'Unique Test : {len(np.unique(y_test))}')
 
 
-    # 4. Create datasets and dataloaders
     train_dataset = GraphSequenceDataset(X_train, y_train)
     val_dataset = GraphSequenceDataset(X_val, y_val)
     test_dataset = GraphSequenceDataset(X_test, y_test)
@@ -279,7 +269,6 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
     
-    # 5. Create and train the model
     num_classes = len(label_map)
     model = GCNBiLSTM(
         num_nodes=NUM_NODES,
@@ -292,21 +281,15 @@ def main():
         label_map=label_map
     )
     
-    # 6. Train the model
     trained_model, train_losses, val_losses, train_accs, val_accs = train_model(
         model, train_loader, val_loader, adj_matrix, 
         num_epochs=100, lr=0.001, weight_decay=5e-4, 
         patience=25, model_save_path='best_gcn_bilstm_model.pt'
     )
     
-    # 7. Evaluate the model
     test_acc, predictions, true_labels = evaluate_model(trained_model, test_loader, adj_matrix)
     
-    # 8. Plot results
     plot_results(train_losses, val_losses, train_accs, val_accs)
-    
-    # 9. Print classification report
-    
     
     print("\nClassification Report:")
     actual_classes = np.unique(true_labels)
@@ -314,7 +297,6 @@ def main():
     class_names = [label_map[int(idx)] for idx in actual_classes]
     print(classification_report(true_labels, predictions, target_names=class_names))
     
-    # 10. Plot confusion matrix
     plt.figure(figsize=(12, 10))
     cm = confusion_matrix(true_labels, predictions)
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)

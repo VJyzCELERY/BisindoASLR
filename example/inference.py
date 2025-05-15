@@ -59,15 +59,12 @@ def main():
                 print("Error: Failed to grab frame from camera.")
                 break
             
-            # Flip frame horizontally for more intuitive interaction
             frame = cv2.flip(frame, 1)
             
-            # Process the frame
             processed_frame = processor.process_frame(frame)
             
-            # Display FPS
             processing_time = time.time() - start_time
-            fps = 1.0 / max(processing_time, 0.001)  # Avoid division by zero
+            fps = 1.0 / max(processing_time, 0.001)
             cv2.putText(
                 processed_frame, 
                 f"FPS: {fps:.1f}", 
@@ -78,7 +75,6 @@ def main():
                 2
             )
             
-            # Display instructions
             cv2.putText(
                 processed_frame,
                 "Press 'q' to quit",
@@ -89,15 +85,12 @@ def main():
                 1
             )
             
-            # Show the frame
             cv2.imshow('Real-time Sign Language Recognition', processed_frame)
             
-            # Check for key press
             key = cv2.waitKey(1)
             if key == ord('q'):
                 break
             
-            # Control frame rate
             elapsed = time.time() - start_time
             if elapsed < target_interval:
                 time.sleep(target_interval - elapsed)
@@ -105,7 +98,6 @@ def main():
     except KeyboardInterrupt:
         print("Interrupted by user.")
     finally:
-        # Release resources
         cap.release()
         cv2.destroyAllWindows()
         print("Application closed.")

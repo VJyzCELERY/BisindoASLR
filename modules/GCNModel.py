@@ -17,7 +17,6 @@ class GCNLayer(nn.Module):
         x: (batch_size * seq_len, num_nodes, in_features)\n
         adj: (num_nodes, num_nodes) - shared across all samples
         """
-        # Ensure adj is on the same device as x
         if adj.device != x.device:
             adj = adj.to(x.device)
             
@@ -25,18 +24,14 @@ class GCNLayer(nn.Module):
         batch_size_seq = x.size(0)
         adj_expanded = adj.unsqueeze(0).expand(batch_size_seq, -1, -1)
         
-        # Graph convolution: first aggregate neighborhood features
-        x = torch.bmm(adj_expanded, x)  # (batch_size * seq_len, num_nodes, in_features)
+        x = torch.bmm(adj_expanded, x)
         
-        # For Conv1d: input needs to be (batch, channels, length)
-        # So we permute from (batch, nodes, features) to (batch, features, nodes)
-        x = x.permute(0, 2, 1)  # -> (batch_size * seq_len, in_features, num_nodes)
-        
-        # Apply convolution
-        x = self.conv(x)  # (batch_size * seq_len, out_features, num_nodes)
+        # We permute from (batch, nodes, features) to (batch, features, nodes)
+        x = x.permute(0, 2, 1)
+        x = self.conv(x) 
         
         # Permute back to original format
-        x = x.permute(0, 2, 1)  # -> (batch_size * seq_len, num_nodes, out_features)
+        x = x.permute(0, 2, 1)
         
         x = F.gelu(x)
         x = self.dropout(x)
@@ -49,14 +44,12 @@ class GCNBiLSTM(nn.Module):
                  num_gcn_layers=2, dropout=0.5, label_map=None):
         super(GCNBiLSTM, self).__init__()
         
-        # Create multiple GCN layers
         self.gcn_layers = nn.ModuleList()
         self.gcn_layers.append(GCNLayer(in_features, gcn_hidden,dropout))
         
         for _ in range(num_gcn_layers - 1):
             self.gcn_layers.append(GCNLayer(gcn_hidden, gcn_hidden,dropout))
         
-        # Bidirectional LSTM layer
         self.lstm = nn.LSTM(
             input_size=num_nodes * gcn_hidden, 
             hidden_size=lstm_hidden, 
@@ -66,14 +59,12 @@ class GCNBiLSTM(nn.Module):
             dropout=dropout if num_gcn_layers > 1 else 0
         )
         
-        # Attention mechanism
         self.attention = nn.Sequential(
             nn.Linear(lstm_hidden * 2, 64),
             nn.Tanh(),
             nn.Linear(64, 1)
         )
         
-        # Output classification layers
         self.classifier = nn.Sequential(
             nn.Linear(lstm_hidden * 2, lstm_hidden),
             nn.ReLU(),
@@ -99,9 +90,8 @@ class GCNBiLSTM(nn.Module):
         gcn_outputs = []
         for t in range(seq_len):
             # Get current time step data
-            curr_x = x[:, t, :, :]  # (batch_size, num_nodes, in_features)
+            curr_x = x[:, t, :, :]
             
-            # Process through GCN layers
             for gcn_layer in self.gcn_layers:
                 curr_x = gcn_layer(curr_x, adj)
                 curr_x = self.dropout(curr_x)
@@ -110,18 +100,16 @@ class GCNBiLSTM(nn.Module):
             curr_x = curr_x.contiguous().view(batch_size, -1)
             gcn_outputs.append(curr_x)
         
-        # Stack outputs to (batch_size, seq_len, num_nodes * gcn_hidden)
         gcn_out = torch.stack(gcn_outputs, dim=1)
         
-        # Process through BiLSTM
-        lstm_out, _ = self.lstm(gcn_out)  # (batch_size, seq_len, lstm_hidden * 2)
+        lstm_out, _ = self.lstm(gcn_out)  
         
         # Apply attention mechanism
-        attn_weights = self.attention(lstm_out).squeeze(-1)  # (batch_size, seq_len)
-        attn_weights = F.softmax(attn_weights, dim=1).unsqueeze(-1)  # (batch_size, seq_len, 1)
+        attn_weights = self.attention(lstm_out).squeeze(-1)  
+        attn_weights = F.softmax(attn_weights, dim=1).unsqueeze(-1) 
         
         # Weighted sum of LSTM outputs
-        context = torch.sum(lstm_out * attn_weights, dim=1)  # (batch_size, lstm_hidden * 2)
+        context = torch.sum(lstm_out * attn_weights, dim=1) 
         
         # Final classification
         output = self.classifier(context)
@@ -131,7 +119,7 @@ class GCNBiLSTM(nn.Module):
     def predict_label(self, x, adj):
         self.eval() 
         with torch.no_grad():
-            logits = self.forward(x, adj)  # Forward pass
+            logits = self.forward(x, adj) 
             pred_classes = torch.argmax(logits, dim=1)
             
             if self.label_map is not None:

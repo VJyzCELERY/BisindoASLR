@@ -11,7 +11,6 @@ def create_norm_adjacency_matrix():
         for i, j in connections:
             adj_matrix[i, j] = 1
             adj_matrix[j, i] = 1
-        # Add self-loops
         for i in range(num_nodes):
             adj_matrix[i, i] = 1
         return adj_matrix
@@ -20,13 +19,10 @@ def create_norm_adjacency_matrix():
     left_hand_adj_matrix = create_adj_matrix(NUM_HAND_LANDMARKS, hand_connections)
     right_hand_adj_matrix = create_adj_matrix(NUM_HAND_LANDMARKS, hand_connections)
 
-    # Calculate the total number of nodes
     total_nodes = NUM_POSE_LANDMARKS + NUM_HAND_LANDMARKS + NUM_HAND_LANDMARKS
 
-    # Initialize a global adjacency matrix
     global_adj_matrix = np.zeros((total_nodes, total_nodes))
     
-    # start_pose = NUM_FACE_LANDMARKS
     start_pose=0
     end_pose = start_pose + NUM_POSE_LANDMARKS
     global_adj_matrix[start_pose:end_pose, start_pose:end_pose] = pose_adj_matrix
@@ -72,7 +68,6 @@ def create_adjacency_matrix():
         for i, j in connections:
             adj_matrix[i, j] = 1
             adj_matrix[j, i] = 1
-        # Add self-loops
         for i in range(num_nodes):
             adj_matrix[i, i] = 1
         return adj_matrix
@@ -81,13 +76,10 @@ def create_adjacency_matrix():
     left_hand_adj_matrix = create_adj_matrix(NUM_HAND_LANDMARKS, hand_connections)
     right_hand_adj_matrix = create_adj_matrix(NUM_HAND_LANDMARKS, hand_connections)
 
-    # Calculate the total number of nodes
     total_nodes = NUM_POSE_LANDMARKS + NUM_HAND_LANDMARKS + NUM_HAND_LANDMARKS
 
-    # Initialize a global adjacency matrix
     global_adj_matrix = np.zeros((total_nodes, total_nodes))
     
-    # start_pose = NUM_FACE_LANDMARKS
     start_pose=0
     end_pose = start_pose + NUM_POSE_LANDMARKS
     global_adj_matrix[start_pose:end_pose, start_pose:end_pose] = pose_adj_matrix
