@@ -18,6 +18,14 @@ from modules.GCNModel import GCNBiLSTM
 from modules.Constants import NUM_NODES,FEATURE_DIM,pose_indices
 from sklearn.preprocessing import LabelEncoder
 
+class DummyHolisticResult:
+    def __init__(self):
+        self.pose_landmarks = None
+        self.face_landmarks = None
+        self.left_hand_landmarks = None
+        self.right_hand_landmarks = None
+
+
 class RealtimeSignLanguageProcessor:
     def __init__(self, model_path=None, sequence_length=3):
         """
@@ -50,6 +58,15 @@ class RealtimeSignLanguageProcessor:
         self.prediction_confidence = 0.0
         self.prediction_time = time.time()
         self.last_update_time = time.time()
+        self.holistic_model = self.mp_holistic.Holistic(
+            static_image_mode=False, 
+            model_complexity=1,  
+            min_detection_confidence=0.6)
+
+        self.hands_model = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.2)
         
     def load_model(self, model_path):
         checkpoint = torch.load(model_path)
@@ -139,98 +156,67 @@ class RealtimeSignLanguageProcessor:
         return visible_count >= min_finger_landmarks
     
     def process_with_multiple_approaches(self, image_rgb, min_finger_landmarks=5):
-        """Process an image with multiple detection approaches and use the best result"""
         best_results = None
         visible_landmarks_count = 0
-        
-        # Try with holistic model first
-        with self.mp_holistic.Holistic(
-            static_image_mode=False, 
-            model_complexity=1,  
-            min_detection_confidence=0.6) as holistic:
-            
-            holistic_results = holistic.process(image_rgb)
-            
-            # Count detected hand landmarks
-            holistic_visible_count = 0
-            
-            if holistic_results.left_hand_landmarks:
-                for landmark in holistic_results.left_hand_landmarks.landmark:
-                    if 0 <= landmark.x <= 1 and 0 <= landmark.y <= 1:
-                        holistic_visible_count += 1
-            
-            if holistic_results.right_hand_landmarks:
-                for landmark in holistic_results.right_hand_landmarks.landmark:
-                    if 0 <= landmark.x <= 1 and 0 <= landmark.y <= 1:
-                        holistic_visible_count += 1
-            
-            if holistic_visible_count > visible_landmarks_count:
-                visible_landmarks_count = holistic_visible_count
-                best_results = holistic_results
-        
-        # Try the dedicated hands model if we don't have enough landmarks
+
+        # First try holistic model
+        holistic_results = self.holistic_model.process(image_rgb)
+        holistic_visible_count = 0
+
+        if holistic_results.left_hand_landmarks:
+            holistic_visible_count += sum(
+                1 for lm in holistic_results.left_hand_landmarks.landmark if 0 <= lm.x <= 1 and 0 <= lm.y <= 1)
+
+        if holistic_results.right_hand_landmarks:
+            holistic_visible_count += sum(
+                1 for lm in holistic_results.right_hand_landmarks.landmark if 0 <= lm.x <= 1 and 0 <= lm.y <= 1)
+
+        if holistic_visible_count > visible_landmarks_count:
+            visible_landmarks_count = holistic_visible_count
+            best_results = holistic_results
+
+        # Try hands model if needed
         if visible_landmarks_count < min_finger_landmarks * 2:
-            with self.mp_hands.Hands(
-                static_image_mode=False,
-                max_num_hands=1,
-                min_detection_confidence=0.2) as hands:
-                
-                hands_results = hands.process(image_rgb)
-                
-                # If hands were detected
-                if hands_results.multi_hand_landmarks:
-                    hands_visible_count = 0
+            hands_results = self.hands_model.process(image_rgb)
+
+            if hands_results.multi_hand_landmarks:
+                hands_visible_count = sum(
+                    1 for hand in hands_results.multi_hand_landmarks
+                    for lm in hand.landmark if 0 <= lm.x <= 1 and 0 <= lm.y <= 1)
+
+                if hands_visible_count > visible_landmarks_count:
+                    visible_landmarks_count = hands_visible_count
+
+                    if best_results is None:
+                        best_results = DummyHolisticResult()
                     
-                    for hand_landmarks in hands_results.multi_hand_landmarks:
-                        for landmark in hand_landmarks.landmark:
-                            if 0 <= landmark.x <= 1 and 0 <= landmark.y <= 1:
-                                hands_visible_count += 1
-                    
-                    # If we found more landmarks than before, incorporate these results
-                    if hands_visible_count > visible_landmarks_count:
-                        visible_landmarks_count = hands_visible_count
-                        
-                        # Create a holistic result-like structure with these hand landmarks
-                        if best_results is None:
-                            with self.mp_holistic.Holistic(static_image_mode=False) as dummy_holistic:
-                                best_results = dummy_holistic.process(np.zeros_like(image_rgb))
-                        
-                        # Use existing best_results but add hand landmarks
-                        if len(hands_results.multi_hand_landmarks) >= 1:
-                            best_results.right_hand_landmarks = hands_results.multi_hand_landmarks[0]
-                        
-                        if len(hands_results.multi_hand_landmarks) >= 2:
-                            best_results.left_hand_landmarks = hands_results.multi_hand_landmarks[1]
-        
-        # Try with enhanced image if we still don't have enough landmarks
+                    if len(hands_results.multi_hand_landmarks) >= 1:
+                        best_results.right_hand_landmarks = hands_results.multi_hand_landmarks[0]
+
+                    if len(hands_results.multi_hand_landmarks) >= 2:
+                        best_results.left_hand_landmarks = hands_results.multi_hand_landmarks[1]
+
+
+        # Enhanced image if still not enough landmarks
         if visible_landmarks_count < min_finger_landmarks * 2:
             enhanced_image = self.apply_skin_mask(cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
             enhanced_image_rgb = cv2.cvtColor(enhanced_image, cv2.COLOR_BGR2RGB)
-            
-            with self.mp_holistic.Holistic(
-                static_image_mode=False, 
-                model_complexity=1,
-                min_detection_confidence=0.6) as holistic:
-                
-                enhanced_results = holistic.process(enhanced_image_rgb)
-                
-                # Count detected hand landmarks
-                enhanced_visible_count = 0
-                
-                if enhanced_results.left_hand_landmarks:
-                    for landmark in enhanced_results.left_hand_landmarks.landmark:
-                        if 0 <= landmark.x <= 1 and 0 <= landmark.y <= 1:
-                            enhanced_visible_count += 1
-                
-                if enhanced_results.right_hand_landmarks:
-                    for landmark in enhanced_results.right_hand_landmarks.landmark:
-                        if 0 <= landmark.x <= 1 and 0 <= landmark.y <= 1:
-                            enhanced_visible_count += 1
-                
-                if enhanced_visible_count > visible_landmarks_count:
-                    visible_landmarks_count = enhanced_visible_count
-                    best_results = enhanced_results
-        
+
+            enhanced_results = self.holistic_model.process(enhanced_image_rgb)
+            enhanced_visible_count = 0
+
+            if enhanced_results.left_hand_landmarks:
+                enhanced_visible_count += sum(
+                    1 for lm in enhanced_results.left_hand_landmarks.landmark if 0 <= lm.x <= 1 and 0 <= lm.y <= 1)
+
+            if enhanced_results.right_hand_landmarks:
+                enhanced_visible_count += sum(
+                    1 for lm in enhanced_results.right_hand_landmarks.landmark if 0 <= lm.x <= 1 and 0 <= lm.y <= 1)
+
+            if enhanced_visible_count > visible_landmarks_count:
+                visible_landmarks_count = enhanced_visible_count
+                best_results = enhanced_results
+
         return best_results
     
     def extract_landmarks(self, results):
